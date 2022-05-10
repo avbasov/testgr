@@ -20,7 +20,7 @@ class Environments(models.Model):
 
 
 class TestJobs(models.Model):
-    uuid = models.CharField(max_length=255, db_index=True)
+    uuid = models.CharField(max_length=255, db_index=True, unique=True)
     # status: 1 "In progress", 2 - "Passed", 3 - "Failed", 4 - "Stopped"
     start_time = models.DateTimeField(blank=True, null=True)
     stop_time = models.DateTimeField(blank=True, null=True)
@@ -35,7 +35,7 @@ class TestJobs(models.Model):
     tests_not_started = models.SmallIntegerField(blank=True, null=True)
     tests_in_progress = models.SmallIntegerField(blank=True, null=True)
     custom_data = models.JSONField(blank=True, null=True)
-    custom_id = models.CharField(max_length=32, blank=True, null=True, db_index=True)
+    custom_id = models.CharField(max_length=32, blank=True, null=True, db_index=True, unique=True)
 
     def get_time_taken(self):
         try:
@@ -72,21 +72,21 @@ class TestJobs(models.Model):
         skipped_percent = float(0 if tests_skipped == 0 else ((tests_skipped * 100) / tests_count))
         not_started_percent = float(0 if tests_not_started == 0 else ((tests_not_started * 100) / tests_count))
 
-        return{"passed_percent": passed_percent,
-               "failed_percent": failed_percent,
-               "aborted_percent": aborted_percent,
-               "skipped_percent": skipped_percent,
-               "not_started_percent": not_started_percent,
-               "passed_percent_float": format(passed_percent, ".2f"),
-               "failed_percent_float": format(failed_percent, ".2f"),
-               "aborted_percent_float": format(aborted_percent, ".2f"),
-               "skipped_percent_float": format(skipped_percent, ".2f"),
-               "not_started_percent_float": format(not_started_percent, ".2f")
-               }
+        return {"passed_percent": passed_percent,
+                "failed_percent": failed_percent,
+                "aborted_percent": aborted_percent,
+                "skipped_percent": skipped_percent,
+                "not_started_percent": not_started_percent,
+                "passed_percent_float": format(passed_percent, ".2f"),
+                "failed_percent_float": format(failed_percent, ".2f"),
+                "aborted_percent_float": format(aborted_percent, ".2f"),
+                "skipped_percent_float": format(skipped_percent, ".2f"),
+                "not_started_percent_float": format(not_started_percent, ".2f")
+                }
 
 
 class TestsStorage(models.Model):
-    identity = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    identity = models.CharField(max_length=255, blank=True, null=True, unique=True)
     test = models.TextField(blank=True, null=True)
     fw_type = models.SmallIntegerField(blank=True, null=True)
     time_taken = models.DurationField(blank=True, null=True)
@@ -212,11 +212,8 @@ class Bugs(models.Model):
 
 
 class Screenshots(models.Model):
-
     name = models.CharField(max_length=128, blank=True, null=True)
     image = models.ImageField(null=True, blank=True, upload_to="screenshots")
     thumbnail = models.ImageField(null=True, blank=True, upload_to="screenshots")
     created_at = models.DateTimeField(auto_now_add=True)
     test = models.ForeignKey(Tests, on_delete=models.CASCADE, related_name='test_parent')
-
-

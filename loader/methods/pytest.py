@@ -1,4 +1,6 @@
+import http
 import json
+import typing
 import uuid
 from statistics import median
 
@@ -28,124 +30,91 @@ class PytestLoader:
     def get_start_test_run(self):
         # print("DBG: startTestRun")
         # print(self.data)
-        try:
-            TestJobs.objects.get(uuid=self.data['job_id'])
-            return HttpResponse(status=409)
-        except ObjectDoesNotExist:
-            pass
-        try:
-            env = Environments.objects.get(name=self.data['env'])
-            # Env name for Redis
-            env_name = env.remapped_name if env.remapped_name is not None else env.name
-        except ObjectDoesNotExist:
-            if self.data['env'] is not None:
-                env = Environments(name=self.data['env'])
-                env.save()
-                # Env name for Redis
-                env_name = env.remapped_name if env.remapped_name is not None else env.name
-            else:
-                try:
-                    env = Environments.objects.get(name="None")
-                    # Env name for Redis
-                    if env.remapped_name:
-                        env_name = env.remapped_name
-                    else:
-                        env_name = env.name
-                except ObjectDoesNotExist:
-                    env = Environments(name="None")
-                    env.save()
-                    # Env name for Redis
-                    env_name = "None"
 
         # We should not create a job without tests
-        if len(self.data['tests']) == 0:
-            return HttpResponse(status=403)
+        job_tests = self.data.get('tests', [])
+        if len(job_tests) == 0:
+            return HttpResponse(status=400)
 
+        job_uuid = self.data.get('job_id')
         try:
-            custom_data = json.loads(self.data["custom_data"])
-        except:
-            custom_data = None
+            uuid.UUID(job_uuid)
+        except ValueError or TypeError:
+            return HttpResponse(status=400)
 
+        if TestJobs.objects.filter(uuid=self.data['job_id']).exists():
+            return HttpResponse(status=409)
+
+        custom_id = self.data.get('custom_id')
+        custom_data = None
+        try:
+            custom_data = json.loads(self.data.get("custom_data"))
+        except TypeError or json.JSONDecodeError:
+            pass
         # If we have job with the same custom id - we should not create any tests, they exists already
-        if self.data['custom_id']:
-            if TestJobs.objects.filter(custom_id=self.data['custom_id']).exists():
-                return "done"
-        job_object = TestJobs(uuid=self.data['job_id'],
-                                  status=1,
-                                  fw_type=2,
-                                  start_time=unix_time_to_datetime(self.data['startTime']),
-                                  env=env,
-                                  custom_data=custom_data,
-                                  custom_id=self.data['custom_id'])
+        if custom_id:
+            if TestJobs.objects.filter(custom_id=custom_id).exists():
+                return HttpResponse(status=200)
+
+        env_name = 'None' if self.data.get('env') is None else self.data.get('env')
+        env, created = Environments.objects.get_or_create(name=env_name)
+        redis_env_name = env.remapped_name if env.remapped_name is not None else env.name
+
+        job_object = TestJobs(uuid=job_uuid,
+                              status=1,
+                              fw_type=2,
+                              start_time=unix_time_to_datetime(self.data['startTime']),  # FIXME get rid of this func
+                              env=env,
+                              custom_data=custom_data,
+                              custom_id=custom_id)
         job_object.save()
 
         # Tests
-        tests_count = 0
         tests = []
-        for test_item in self.data['tests']:
-            uuid = test_item['uuid']
-            description = test_item['description']
-
-            # Tests Storage
+        for test_item in job_tests:
+            test_uuid = test_item.get('uuid')
             try:
-                test_storage_item = TestsStorage.objects.get(identity=test_item['nodeid'])
-                # If no test obj exists
-                if not test_storage_item.test:
-                    test_storage_item.test = test_item['nodeid'].split('::')[-1]
-                    test_storage_item.description = description
-                    test_storage_item.save()
-                # If test obj exists with null description
-                elif test_storage_item.test and not test_storage_item.description:
-                    test_storage_item.description = description
-                    test_storage_item.save()
-                # if test obj exists with description
-                elif test_storage_item.test and test_storage_item.description:
-                    if test_storage_item.description == description:
-                        pass
-                    else:
-                        test_storage_item.description = description
-                        test_storage_item.save()
-            except ObjectDoesNotExist:
-                test_storage_item = TestsStorage(identity=test_item['nodeid'],
-                                                 test=test_item['nodeid'].split('::')[-1], description=description)
-                test_storage_item.save()
+                uuid.UUID(job_uuid)
+            except ValueError or TypeError:
+                continue
 
-            tests.append({'test_uuid': uuid, 'status': 1, 'job': job_object.pk, 'test': test_storage_item.pk})
-            tests_count += 1
+            identity = test_item.get('nodeid', '::')
+            description = test_item.get('description')
 
-        with connection.cursor() as cursor:
-            for test in tests:
-                cursor.execute("INSERT INTO loader_tests (uuid, status, job_id, test_id)"
-                               "VALUES(%s, 1, %s, %s)",
-                               [test['test_uuid'], test['job'], test['test']])
+            test_storage_item, created = TestsStorage.objects.update_or_create(
+                identity=identity,
+                defaults={
+                    'test': identity.split('::')[-1],
+                    'description': description,
+                }
+            )
 
-        tests_not_started = job_object.tests.count()
+            tests.append(Tests(uuid=test_uuid, status=1, job=job_object, test=test_storage_item))
+
+        Tests.objects.bulk_create(tests)
+
+        tests_not_started = len(tests)
         job_object.tests_not_started = tests_not_started
         job_object.save()
 
         # Redis data
         # We are creating/updating "running_jobs" list in Redis with our new job item
-        if self.data["custom_id"]:
-            job = "job_" + self.data["custom_id"]
-        else:
-            job = "job_" + self.data['job_id']
-        self.redis.connect.rpush("running_jobs", job)
+        redis_job_id = f"job_{job_uuid}" if custom_id is None else f"job_{custom_id}"
+
+        self.redis.connect.rpush("running_jobs", redis_job_id)
         data = str({
-            "uuid": self.data["job_id"],
+            "uuid": job_uuid,
             "status": "1",
-            "start_time": timezone.localtime(unix_time_to_datetime(self.data['startTime']))
-                .strftime('%d-%b-%Y, %H:%M:%S'),
+            "start_time": timezone.localtime(unix_time_to_datetime(self.data['startTime'])).strftime(
+                '%d-%b-%Y, %H:%M:%S'),
             "tests_not_started": str(tests_not_started),
-            "env": str(env_name),
-            "tests_total_count": str(tests_count)
+            "env": str(redis_env_name),
+            "tests_total_count": str(len(tests))
         })
-        if self.data["custom_id"]:
-            self.redis.set_value("job_" + self.data["custom_id"], data)
-        else:
-            self.redis.set_value("job_" + self.data['job_id'], data)
+        self.redis.set_value(redis_job_id, data)
         self.redis.set_value("update_running_jobs", "1")
 
-        return "done"
+        return HttpResponse(status=200)
 
     @classmethod
     def start_test_run(cls, data):
@@ -166,7 +135,7 @@ class PytestLoader:
                 if (int(0 if job_object.tests_passed is None else job_object.tests_passed)
                     + int(0 if job_object.tests_failed is None else job_object.tests_failed) +
                     int(0 if job_object.tests_skipped is None else job_object.tests_skipped)) \
-                        < int(data["tests_total_count"]):
+                    < int(data["tests_total_count"]):
                     return "done"
             else:
                 job_object = TestJobs.objects.get(uuid=self.data['job_id'])
@@ -315,7 +284,7 @@ class PytestLoader:
                     else:
                         self.redis.set_value("job_" + self.data['job_id'], data)
 
-                    return "done"  
+                    return "done"
                 except ObjectDoesNotExist:
                     return HttpResponse(status=200)
             else:
